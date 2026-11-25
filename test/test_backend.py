@@ -95,6 +95,9 @@ class CameraApiTests(unittest.TestCase):
         api.last_frame_jpeg = None
         api.last_stream_jpeg = None
         api.last_frame_sequence = 0
+        with api.camera_frame_queue_lock:
+            api.pending_camera_frame = None
+            api.camera_frame_worker_active = False
 
     def test_frame_requires_bearer_token(self):
         with self.assertRaises(HTTPException) as error:
@@ -106,19 +109,51 @@ class CameraApiTests(unittest.TestCase):
         self.assertEqual(error.exception.status_code, 401)
 
     def test_valid_jpeg_updates_camera_status(self):
-        with patch.object(api.hands, "process", return_value=SimpleNamespace(multi_hand_landmarks=None)):
+        background_tasks = BackgroundTasks()
+        with patch.object(
+            api.hands,
+            "process",
+            return_value=SimpleNamespace(multi_hand_landmarks=None),
+        ) as process_mock:
             result = asyncio.run(
                 api.receive_camera_frame(
                     make_request(self.jpeg),
+                    background_tasks,
+                    authorization="Bearer test-camera-token",
+                )
+            )
+            process_mock.assert_not_called()
+            self.assertTrue(result["received"])
+            self.assertEqual(result["processing"], "queued")
+            self.assertTrue(api.camera_status()["connected"])
+            self.assertEqual(api.latest_camera_frame().body, self.jpeg)
+            self.assertEqual(api.last_stream_jpeg, self.jpeg)
+            self.assertEqual(api.last_frame_sequence, 1)
+            asyncio.run(background_tasks())
+            process_mock.assert_called_once()
+            self.assertNotEqual(api.last_stream_jpeg, self.jpeg)
+            self.assertEqual(api.last_frame_sequence, 2)
+
+    def test_busy_worker_keeps_only_the_latest_pending_frame(self):
+        api.camera_frame_worker_active = True
+        ok, image = cv2.imencode(
+            ".jpg", np.full((80, 120, 3), 255, dtype=np.uint8)
+        )
+        self.assertTrue(ok)
+        newest_jpeg = image.tobytes()
+
+        for jpeg in (self.jpeg, newest_jpeg):
+            asyncio.run(
+                api.receive_camera_frame(
+                    make_request(jpeg),
                     BackgroundTasks(),
                     authorization="Bearer test-camera-token",
                 )
             )
-        self.assertTrue(result["received"])
-        self.assertTrue(api.camera_status()["connected"])
-        self.assertEqual(api.latest_camera_frame().body, self.jpeg)
-        self.assertIsNotNone(api.last_stream_jpeg)
-        self.assertEqual(api.last_frame_sequence, 1)
+
+        self.assertEqual(api.pending_camera_frame[0], newest_jpeg)
+        self.assertEqual(api.last_stream_jpeg, newest_jpeg)
+        self.assertEqual(api.last_frame_sequence, 2)
 
     def test_camera_stream_yields_mjpeg_frames(self):
         api.last_stream_jpeg = self.jpeg
@@ -156,15 +191,18 @@ class CameraApiTests(unittest.TestCase):
         self.assertEqual(error.exception.status_code, 404)
 
     def test_invalid_jpeg_is_rejected(self):
-        with self.assertRaises(HTTPException) as error:
-            asyncio.run(
-                api.receive_camera_frame(
-                    make_request(b"not-a-jpeg"),
-                    BackgroundTasks(),
-                    authorization="Bearer test-camera-token",
+        for invalid_jpeg in (b"not-a-jpeg", b"\xff\xd8truncated"):
+            with self.subTest(invalid_jpeg=invalid_jpeg), self.assertRaises(
+                HTTPException
+            ) as error:
+                asyncio.run(
+                    api.receive_camera_frame(
+                        make_request(invalid_jpeg),
+                        BackgroundTasks(),
+                        authorization="Bearer test-camera-token",
+                    )
                 )
-            )
-        self.assertEqual(error.exception.status_code, 400)
+            self.assertEqual(error.exception.status_code, 400)
 
     def test_oversized_frame_is_rejected(self):
         body = b"x" * (api.MAX_FRAME_BYTES + 1)

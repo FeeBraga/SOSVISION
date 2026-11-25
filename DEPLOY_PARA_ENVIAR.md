@@ -81,14 +81,14 @@ https://<URL-REAL-DO-RENDER>/api/camera/frame
 3. Compile e grave na placa com o ambiente `esp32-s3` do PlatformIO. A configuração já seleciona o perfil ESP32-S3 N16R8.
 4. No painel, abra `/central`. O indicador da câmera fica conectado depois de receber quadros recentes.
 
-O firmware valida TLS com o bundle CA confiável do Arduino-ESP32 e sincroniza o relógio via NTP antes do primeiro envio. Em operação normal, envia até um JPEG por segundo; falhas entram em backoff exponencial até 60 segundos. O preview HTTP local da câmera foi mantido para testes na rede local; ele não é o endereço público da API.
+O firmware valida TLS com o bundle CA confiável do Arduino-ESP32 e sincroniza o relógio via NTP antes do primeiro envio. A meta é um intervalo mínimo de 250 ms entre inícios de envios (máximo teórico de 4 quadros/s); o ESP32 nunca sobrepõe POSTs. Após validar autenticação, tipo e tamanho, a API publica o JPEG bruto no stream e confirma o POST sem esperar o MediaPipe. O processamento usa um único worker e um slot latest-only: quadros ainda pendentes são substituídos pelo mais novo, evitando backlog; a anotação de um quadro antigo não substitui a imagem atual. A taxa efetiva depende de captura, rede e ida-e-volta HTTP, e a leitura de gestos pode aparecer depois da imagem. Isto melhora a monitorização, mas não é vídeo fluido de 30 fps. Falhas entram em backoff exponencial até 60 segundos. O preview HTTP local da câmera foi mantido para testes na rede local; ele não é o endereço público da API.
 
 ## Endpoints da API Render
 
 | Método | Caminho | Uso |
 |---|---|---|
 | `GET` | `/api/health` | saúde do backend |
-| `POST` | `/api/camera/frame` | recebe JPEG; exige `Authorization: Bearer <CAMERA_TOKEN>` e `Content-Type: image/jpeg` |
+| `POST` | `/api/camera/frame` | valida e enfileira o JPEG para análise em background; exige `Authorization: Bearer <CAMERA_TOKEN>` e `Content-Type: image/jpeg` |
 | `GET` | `/api/camera/status` | conectado e horário do último quadro |
 | `GET` | `/api/alertas` | lista alertas persistidos |
 | `POST` | `/api/alertas` | cria alerta |

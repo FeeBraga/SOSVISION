@@ -15,7 +15,6 @@ from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request, Re
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, ConfigDict, Field
 from starlette.responses import StreamingResponse
-from starlette.concurrency import run_in_threadpool
 
 from gesture_detection import reconhecer_gesto
 
@@ -69,6 +68,9 @@ last_frame_jpeg = None
 last_stream_jpeg = None
 last_frame_sequence = 0
 last_frame_lock = threading.Lock()
+camera_frame_queue_lock = threading.Lock()
+pending_camera_frame: tuple[bytes, datetime, int] | None = None
+camera_frame_worker_active = False
 logger = logging.getLogger("uvicorn.error")
 
 
@@ -302,6 +304,13 @@ async def receive_camera_frame(
     background_tasks: BackgroundTasks,
     authorization: str | None = Header(default=None),
 ):
+    global last_frame_jpeg
+    global last_stream_jpeg
+    global last_frame_received_at
+    global last_frame_sequence
+    global pending_camera_frame
+    global camera_frame_worker_active
+
     if not camera_token:
         raise HTTPException(status_code=503, detail="Autenticação da câmera não configurada")
     if authorization != f"Bearer {camera_token}":
@@ -324,17 +333,45 @@ async def receive_camera_frame(
     jpeg = bytes(frame_bytes)
     if not jpeg:
         raise HTTPException(status_code=400, detail="Imagem vazia")
+    if (
+        len(jpeg) < 4
+        or not jpeg.startswith(b"\xff\xd8")
+        or not jpeg.endswith(b"\xff\xd9")
+    ):
+        raise HTTPException(status_code=400, detail="JPEG inválido")
 
-    try:
-        body, notification = await run_in_threadpool(_process_frame, jpeg)
-    except ValueError as error:
-        raise HTTPException(status_code=400, detail="JPEG inválido") from error
-    if notification is not None:
-        background_tasks.add_task(_send_whatsapp_alert, notification)
-    return body
+    received_at = datetime.now(timezone.utc)
+    with last_frame_lock:
+        last_frame_jpeg = jpeg
+        last_stream_jpeg = jpeg
+        last_frame_received_at = received_at
+        last_frame_sequence += 1
+        frame_sequence = last_frame_sequence
+
+    schedule_worker = False
+    with camera_frame_queue_lock:
+        # Latest-only: quadros ainda não processados são substituídos pelo novo.
+        pending_camera_frame = (jpeg, received_at, frame_sequence)
+        if not camera_frame_worker_active:
+            camera_frame_worker_active = True
+            schedule_worker = True
+
+    if schedule_worker:
+        background_tasks.add_task(_drain_camera_frame_queue)
+
+    return {
+        "received": True,
+        "gesture": None,
+        "alert": None,
+        "processing": "queued",
+    }
 
 
-def _process_frame(jpeg: bytes):
+def _process_frame(
+    jpeg: bytes,
+    received_at: datetime | None = None,
+    frame_sequence: int | None = None,
+):
     global last_frame_received_at
     global last_frame_jpeg
     global last_stream_jpeg
@@ -344,7 +381,8 @@ def _process_frame(jpeg: bytes):
     if frame is None:
         raise ValueError("Invalid JPEG image")
     rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    received_at = datetime.now(timezone.utc)
+    received_at = received_at or datetime.now(timezone.utc)
+
     notification = None
 
     with vision_lock:
@@ -418,10 +456,11 @@ def _process_frame(jpeg: bytes):
         raise RuntimeError("Não foi possível codificar o quadro anotado")
 
     with last_frame_lock:
-        last_frame_jpeg = jpeg
-        last_stream_jpeg = stream_buffer.tobytes()
-        last_frame_received_at = received_at
-        last_frame_sequence += 1
+        if frame_sequence is None or frame_sequence == last_frame_sequence:
+            last_frame_jpeg = jpeg
+            last_stream_jpeg = stream_buffer.tobytes()
+            last_frame_received_at = received_at
+            last_frame_sequence += 1
 
     if gesture is not None:
         try:
@@ -431,6 +470,34 @@ def _process_frame(jpeg: bytes):
             raise
         return {"received": True, "gesture": detected, "alert": saved_alert}, notification
     return {"received": True, "gesture": detected, "alert": None}, None
+
+
+def _drain_camera_frame_queue():
+    global pending_camera_frame
+    global camera_frame_worker_active
+
+    while True:
+        with camera_frame_queue_lock:
+            queued_frame = pending_camera_frame
+            pending_camera_frame = None
+            if queued_frame is None:
+                camera_frame_worker_active = False
+                return
+
+        jpeg, received_at, frame_sequence = queued_frame
+        try:
+            _, notification = _process_frame(jpeg, received_at, frame_sequence)
+            if notification is not None:
+                threading.Thread(
+                    target=_send_whatsapp_alert,
+                    args=(notification,),
+                    name="camera-alert-notification",
+                    daemon=True,
+                ).start()
+        except ValueError:
+            logger.warning("JPEG inválido descartado pelo processador de câmera.")
+        except Exception:
+            logger.exception("Falha ao processar quadro recebido da câmera.")
 
 
 @app.get("/api/alertas")

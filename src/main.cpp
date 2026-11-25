@@ -23,7 +23,7 @@ static const char* ssid = SOS_WIFI_SSID;
 static const char* password = SOS_WIFI_PASSWORD;
 static bool localServersStarted = false;
 static unsigned long lastWifiAttempt = 0;
-static constexpr unsigned long FRAME_INTERVAL_MS = 1000UL;
+static constexpr unsigned long FRAME_INTERVAL_MS = 250UL;
 static constexpr unsigned long MAX_CLOUD_FRAME_BYTES = 2000000UL;
 static unsigned long nextCloudAttemptAt = 0;
 static unsigned long cloudRetryDelayMs = 1000UL;
@@ -675,9 +675,10 @@ void loop() {
 
     const unsigned long now = millis();
     if (static_cast<int32_t>(now - nextCloudAttemptAt) >= 0) {
+        const unsigned long attemptStartedAt = millis();
         if (sendFrameToCloud()) {
             cloudRetryDelayMs = 1000UL;
-            nextCloudAttemptAt = millis() + FRAME_INTERVAL_MS;
+            nextCloudAttemptAt = attemptStartedAt + FRAME_INTERVAL_MS;
         } else {
             nextCloudAttemptAt = millis() + cloudRetryDelayMs;
             if (cloudRetryDelayMs < 30000UL) {
