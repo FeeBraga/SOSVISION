@@ -1,5 +1,6 @@
 import asyncio
 import unittest
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -91,6 +92,9 @@ class CameraApiTests(unittest.TestCase):
         api.recent_gestures.clear()
         api.gesture_confirmation = api.GestureConfirmation()
         api.last_frame_received_at = None
+        api.last_frame_jpeg = None
+        api.last_stream_jpeg = None
+        api.last_frame_sequence = 0
 
     def test_frame_requires_bearer_token(self):
         with self.assertRaises(HTTPException) as error:
@@ -112,6 +116,44 @@ class CameraApiTests(unittest.TestCase):
             )
         self.assertTrue(result["received"])
         self.assertTrue(api.camera_status()["connected"])
+        self.assertEqual(api.latest_camera_frame().body, self.jpeg)
+        self.assertIsNotNone(api.last_stream_jpeg)
+        self.assertEqual(api.last_frame_sequence, 1)
+
+    def test_camera_stream_yields_mjpeg_frames(self):
+        api.last_stream_jpeg = self.jpeg
+        api.last_frame_sequence = 1
+
+        async def first_chunk():
+            stream = api.stream_camera_frames()
+            chunk = await stream.__anext__()
+            await stream.aclose()
+            return chunk
+
+        chunk = asyncio.run(first_chunk())
+
+        self.assertTrue(chunk.startswith(b"--frame\r\n"))
+        self.assertIn(b"Content-Type: image/jpeg\r\n", chunk)
+        self.assertTrue(chunk.endswith(self.jpeg + b"\r\n"))
+
+    def test_latest_frame_returns_jpeg_and_server_timestamp(self):
+        timestamp = datetime.now(timezone.utc)
+        api.last_frame_jpeg = self.jpeg
+        api.last_frame_received_at = timestamp
+
+        response = api.latest_camera_frame()
+
+        self.assertEqual(response.body, self.jpeg)
+        self.assertEqual(response.media_type, "image/jpeg")
+        self.assertEqual(response.headers["X-Frame-Received-At"], timestamp.isoformat())
+        self.assertEqual(
+            response.headers["Cache-Control"], "no-store, no-cache, must-revalidate"
+        )
+
+    def test_latest_frame_returns_404_before_first_image(self):
+        with self.assertRaises(HTTPException) as error:
+            api.latest_camera_frame()
+        self.assertEqual(error.exception.status_code, 404)
 
     def test_invalid_jpeg_is_rejected(self):
         with self.assertRaises(HTTPException) as error:

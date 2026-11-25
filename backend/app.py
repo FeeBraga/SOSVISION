@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import logging
 import os
@@ -13,6 +14,7 @@ import requests
 from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, ConfigDict, Field
+from starlette.responses import StreamingResponse
 from starlette.concurrency import run_in_threadpool
 
 from gesture_detection import reconhecer_gesto
@@ -43,6 +45,7 @@ app.add_middleware(
     allow_origins=allowed_origins,
     allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type"],
+    expose_headers=["X-Frame-Received-At"],
 )
 
 hands = mp.solutions.hands.Hands(
@@ -58,6 +61,10 @@ current_gesture = None
 alert_sent_for_gesture = False
 last_alert_at = 0.0
 last_frame_received_at = None
+last_frame_jpeg = None
+last_stream_jpeg = None
+last_frame_sequence = 0
+last_frame_lock = threading.Lock()
 logger = logging.getLogger("uvicorn.error")
 
 
@@ -222,7 +229,8 @@ def health():
 
 @app.get("/api/camera/status")
 def camera_status():
-    last_received = last_frame_received_at
+    with last_frame_lock:
+        last_received = last_frame_received_at
     connected = bool(
         last_received
         and (datetime.now(timezone.utc) - last_received).total_seconds()
@@ -232,6 +240,56 @@ def camera_status():
         "connected": connected,
         "last_image_received_at": last_received.isoformat() if last_received else None,
     }
+
+
+@app.get("/api/camera/frame/latest")
+def latest_camera_frame():
+    with last_frame_lock:
+        frame = last_frame_jpeg
+        received_at = last_frame_received_at
+
+    if frame is None or received_at is None:
+        raise HTTPException(status_code=404, detail="A câmera ainda não enviou imagens")
+
+    return Response(
+        content=frame,
+        media_type="image/jpeg",
+        headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate",
+            "X-Frame-Received-At": received_at.isoformat(),
+        },
+    )
+
+
+async def stream_camera_frames():
+    last_sent_sequence = 0
+    while True:
+        with last_frame_lock:
+            frame = last_stream_jpeg
+            sequence = last_frame_sequence
+
+        if frame is not None and sequence != last_sent_sequence:
+            last_sent_sequence = sequence
+            yield (
+                b"--frame\r\n"
+                b"Content-Type: image/jpeg\r\n"
+                + f"Content-Length: {len(frame)}\r\n\r\n".encode("ascii")
+                + frame
+                + b"\r\n"
+            )
+        await asyncio.sleep(0.1)
+
+
+@app.get("/api/camera/stream")
+def camera_stream():
+    return StreamingResponse(
+        stream_camera_frames(),
+        media_type="multipart/x-mixed-replace; boundary=frame",
+        headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @app.post("/api/camera/frame")
@@ -274,19 +332,33 @@ async def receive_camera_frame(
 
 def _process_frame(jpeg: bytes):
     global last_frame_received_at
+    global last_frame_jpeg
+    global last_stream_jpeg
+    global last_frame_sequence
 
     frame = cv2.imdecode(np.frombuffer(jpeg, dtype=np.uint8), cv2.IMREAD_COLOR)
     if frame is None:
         raise ValueError("Invalid JPEG image")
     rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    received_at = datetime.now(timezone.utc)
     notification = None
 
     with vision_lock:
-        last_frame_received_at = datetime.now(timezone.utc)
         result = hands.process(rgb)
-        candidate = (
-            reconhecer_gesto(result.multi_hand_landmarks[0])
+        landmarks = (
+            result.multi_hand_landmarks[0]
             if result.multi_hand_landmarks
+            else None
+        )
+        if landmarks:
+            mp.solutions.drawing_utils.draw_landmarks(
+                frame,
+                landmarks,
+                mp.solutions.hands.HAND_CONNECTIONS,
+            )
+        candidate = (
+            reconhecer_gesto(landmarks)
+            if landmarks
             else None
         )
         recent_gestures.append(candidate)
@@ -296,11 +368,56 @@ def _process_frame(jpeg: bytes):
             None,
         )
 
-        should_alert = gesture_confirmation.observe(detected, time.monotonic())
+        now = time.monotonic()
+        should_alert = gesture_confirmation.observe(detected, now)
         if should_alert:
             gesture = detected
         else:
             gesture = None
+
+        if detected is None:
+            reading_label = "Aguardando gesto..."
+        elif gesture_confirmation.alert_sent:
+            reading_label = f"ALERTA ENVIADO: {detected}"
+        else:
+            elapsed = max(0.0, now - (gesture_confirmation.started_at or now))
+            reading_label = (
+                f"CONFIRMANDO: {detected} "
+                f"{min(elapsed, TEMPO_CONFIRMACAO):.1f}/{TEMPO_CONFIRMACAO:.1f}s"
+            )
+
+    height, width = frame.shape[:2]
+    cv2.rectangle(frame, (0, 0), (width, 58), (20, 25, 30), thickness=-1)
+    cv2.putText(
+        frame,
+        reading_label,
+        (12, 25),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.58,
+        (80, 230, 120) if detected is not None else (220, 220, 220),
+        2,
+        cv2.LINE_AA,
+    )
+    local_received_at = received_at.astimezone(timezone(timedelta(hours=-3)))
+    cv2.putText(
+        frame,
+        f"LIDO: {local_received_at.strftime('%d/%m/%Y %H:%M:%S')}",
+        (12, 48),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.45,
+        (220, 220, 220),
+        1,
+        cv2.LINE_AA,
+    )
+    encoded, stream_buffer = cv2.imencode(".jpg", frame)
+    if not encoded:
+        raise RuntimeError("Não foi possível codificar o quadro anotado")
+
+    with last_frame_lock:
+        last_frame_jpeg = jpeg
+        last_stream_jpeg = stream_buffer.tobytes()
+        last_frame_received_at = received_at
+        last_frame_sequence += 1
 
     if gesture is not None:
         try:

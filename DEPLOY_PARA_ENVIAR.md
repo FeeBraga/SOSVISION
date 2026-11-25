@@ -11,7 +11,7 @@ Este arquivo descreve como publicar a versão que está no projeto. **Não cont�
 | Supabase | `alert-buddy-tech-main/supabase/migrations/` | banco persistente dos alertas |
 | ESP32 | `src/main.cpp`, `include/secrets.example.h` | captura da OV5640 e envio de JPEG |
 
-O firmware manda cada JPEG para `POST https://<URL-DO-RENDER>/api/camera/frame`. A câmera autentica com `CAMERA_TOKEN`. O painel consulta `https://<URL-DO-RENDER>/api/alertas` e o status em `/api/health` e `/api/camera/status`.
+O firmware manda cada JPEG para `POST https://<URL-DO-RENDER>/api/camera/frame`. A câmera autentica com `CAMERA_TOKEN`. O painel consulta `https://<URL-DO-RENDER>/api/alertas` e o status em `/api/health` e `/api/camera/status`; também acompanha o stream contínuo de `/api/camera/stream`, com os pontos da mão, o gesto em leitura e o horário de recebimento.
 
 ## 1. Publique primeiro o backend no Render
 
@@ -79,9 +79,9 @@ https://<URL-REAL-DO-RENDER>/api/camera/frame
 ```
 
 3. Compile e grave na placa com o ambiente `esp32-s3` do PlatformIO. A configuração já seleciona o perfil ESP32-S3 N16R8.
-4. No painel, abra `/central`. O indicador da câmera fica conectado depois de receber quadros recentes.
+4. No painel, abra `/central`. O indicador da câmera fica conectado depois de receber quadros recentes, e o preview ao vivo mostra os pontos da mão, o gesto sendo confirmado e o horário da leitura.
 
-O envio está limitado a aproximadamente dois JPEGs por segundo. O preview HTTP local da câmera foi mantido para testes na rede local; ele não é o endereço público da API.
+O envio está limitado a aproximadamente dois JPEGs por segundo; o stream atualiza conforme esses quadros chegam, sem gravar vídeo. O backend mantém somente os quadros necessários para o stream em memória. O endpoint do stream é público, como o painel atual; não o use em locais onde a imagem da câmera não possa ser exibida publicamente. O preview HTTP local da câmera foi mantido para testes na rede local; ele não é o endereço público da API.
 
 ## Endpoints da API Render
 
@@ -90,6 +90,8 @@ O envio está limitado a aproximadamente dois JPEGs por segundo. O preview HTTP 
 | `GET` | `/api/health` | saúde do backend |
 | `POST` | `/api/camera/frame` | recebe JPEG; exige `Authorization: Bearer <CAMERA_TOKEN>` e `Content-Type: image/jpeg` |
 | `GET` | `/api/camera/status` | conectado e horário do último quadro |
+| `GET` | `/api/camera/frame/latest` | último JPEG recebido, com horário no cabeçalho `X-Frame-Received-At` |
+| `GET` | `/api/camera/stream` | stream MJPEG público com quadro anotado e leitura do gesto |
 | `GET` | `/api/alertas` | lista alertas persistidos |
 | `POST` | `/api/alertas` | cria alerta |
 | `PATCH` | `/api/alertas/{id}` | atualiza status |

@@ -78,3 +78,7 @@ export function obterStatusCamera() {
     "/api/camera/status",
   );
 }
+
+export function obterUrlStreamCamera() {
+  return apiUrl("/api/camera/stream");
+}
