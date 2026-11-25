@@ -1,0 +1,27 @@
+services:
+  - type: web
+    name: sos-vision-api
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn backend.app:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /api/health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.8
+      - key: CAMERA_TOKEN
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: ALLOWED_ORIGINS
+        sync: false
+      - key: CAMERA_ID
+        value: esp32_s3_01
+      - key: CALLMEBOT_PHONE
+        value: ""
+      - key: CALLMEBOT_APIKEY
+        value: ""
+      - key: MODO_TESTE
+        value: "false"
