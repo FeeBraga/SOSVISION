@@ -11,10 +11,7 @@
 #if __has_include("secrets.h")
 #include "secrets.h"
 #else
-#define SOS_WIFI_SSID ""
-#define SOS_WIFI_PASSWORD ""
-#define SOS_API_URL ""
-#define SOS_CAMERA_TOKEN ""
+#error "Missing include/secrets.h. Copy include/secrets.example.h and configure it locally."
 #endif
 
 // ==========================================
