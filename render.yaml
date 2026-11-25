@@ -16,7 +16,7 @@ services:
       - key: SUPABASE_SERVICE_ROLE_KEY
         sync: false
       - key: ALLOWED_ORIGINS
-        sync: false
+        value: https://sosalerta.netlify.app
       - key: CAMERA_ID
         value: esp32_s3_01
       - key: CALLMEBOT_PHONE

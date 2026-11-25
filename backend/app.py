@@ -31,17 +31,21 @@ callmebot_apikey = os.getenv("CALLMEBOT_APIKEY", "")
 test_mode = os.getenv("MODO_TESTE", "false").lower() == "true"
 supabase_url = os.getenv("SUPABASE_URL", os.getenv("VITE_SUPABASE_URL", "")).rstrip("/")
 supabase_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
-allowed_origins = [
+configured_origins = [
     origin.strip()
     for origin in os.getenv(
-        "ALLOWED_ORIGINS", "http://localhost:8080,http://localhost:5173"
+        "ALLOWED_ORIGINS", ""
     ).split(",")
     if origin.strip()
 ]
+allowed_origins = list(
+    dict.fromkeys(["https://sosalerta.netlify.app", *configured_origins])
+)
 
 app = FastAPI(title="SOS Vision API", version="1.0.0")
 app.add_middleware(
     CORSMiddleware,
+    # Origem de produção explícita; nunca usar "*" com endpoints autenticados.
     allow_origins=allowed_origins,
     allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type"],
