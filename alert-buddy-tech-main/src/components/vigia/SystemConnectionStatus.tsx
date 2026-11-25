@@ -121,8 +121,9 @@ export function SystemConnectionStatus() {
           )}
         </div>
         <p className="border-t border-border px-3 py-2 text-muted-foreground">
-          O vídeo mostra os pontos da mão, o gesto em confirmação e a hora de leitura. Atualiza
-          conforme a ESP32 envia quadros (até 2 por segundo).
+          A imagem atualiza conforme a ESP32 envia quadros (teto teórico de até 4 por segundo; a taxa
+          real depende da captura e da rede). A leitura de gestos roda separada e pode aparecer depois;
+          isso não é vídeo fluido de 30 fps.
         </p>
       </div>
     </div>

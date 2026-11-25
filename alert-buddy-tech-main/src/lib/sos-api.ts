@@ -30,13 +30,27 @@ async function requestApi<T>(path: string, init?: RequestInit): Promise<T> {
     },
   });
   const text = await response.text();
-  const payload: unknown = text ? JSON.parse(text) : undefined;
+  let payload: unknown;
+  let responseWasNonJson = false;
+  if (text) {
+    try {
+      payload = JSON.parse(text);
+    } catch {
+      responseWasNonJson = true;
+      payload = text.trim().slice(0, 240);
+    }
+  }
   if (!response.ok) {
     const detail =
       payload && typeof payload === "object" && "detail" in payload
         ? String(payload.detail)
-        : `Falha na API (${response.status})`;
+        : typeof payload === "string" && payload
+          ? `Falha na API (${response.status}): ${payload}`
+          : `Falha na API (${response.status})`;
     throw new Error(detail);
+  }
+  if (responseWasNonJson) {
+    throw new Error("A API retornou uma resposta que não é JSON.");
   }
   return payload as T;
 }
