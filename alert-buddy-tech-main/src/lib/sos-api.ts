@@ -88,9 +88,12 @@ export function obterSaudeApi() {
 }
 
 export function obterStatusCamera() {
-  return requestApi<{ connected: boolean; last_image_received_at: string | null }>(
-    "/api/camera/status",
-  );
+  return requestApi<{
+    connected: boolean;
+    last_image_received_at: string | null;
+    live_gesture: string | null;
+    last_gesture_frame_at: string | null;
+  }>("/api/camera/status", { cache: "no-store" });
 }
 
 export function obterUrlStreamCamera() {

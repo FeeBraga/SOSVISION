@@ -10,10 +10,13 @@ export function SystemConnectionStatus() {
   const [server, setServer] = useState<Connection>("checking");
   const [camera, setCamera] = useState<Connection>("checking");
   const [lastImage, setLastImage] = useState<string | null>(null);
+  const [liveGesture, setLiveGesture] = useState<string | null>(null);
+  const [gestureFrameAt, setGestureFrameAt] = useState<string | null>(null);
   const [streamUrl, setStreamUrl] = useState<string | null>(null);
   const [streamReady, setStreamReady] = useState(false);
   const [streamError, setStreamError] = useState<string | null>(null);
-  const refreshingRef = useRef(false);
+  const cameraRefreshingRef = useRef(false);
+  const healthRefreshingRef = useRef(false);
 
   useEffect(() => {
     let active = true;
@@ -25,33 +28,44 @@ export function SystemConnectionStatus() {
       );
     }
 
-    const refresh = async () => {
-      if (refreshingRef.current) return;
-      refreshingRef.current = true;
+    const refreshCamera = async () => {
+      if (cameraRefreshingRef.current) return;
+      cameraRefreshingRef.current = true;
       try {
-        const [healthResult, cameraResult] = await Promise.allSettled([
-          obterSaudeApi(),
-          obterStatusCamera(),
-        ]);
+        const cameraResult = await obterStatusCamera();
         if (!active) return;
-
-        setServer(healthResult.status === "fulfilled" ? "online" : "offline");
-        if (cameraResult.status === "fulfilled") {
-          setCamera(cameraResult.value.connected ? "online" : "offline");
-          setLastImage(cameraResult.value.last_image_received_at);
-        } else {
-          setCamera("offline");
-        }
+        setCamera(cameraResult.connected ? "online" : "offline");
+        setLastImage(cameraResult.last_image_received_at);
+        setLiveGesture(cameraResult.live_gesture);
+        setGestureFrameAt(cameraResult.last_gesture_frame_at);
+      } catch {
+        if (active) setCamera("offline");
       } finally {
-        refreshingRef.current = false;
+        cameraRefreshingRef.current = false;
       }
     };
 
-    void refresh();
-    const interval = window.setInterval(() => void refresh(), 2000);
+    const refreshHealth = async () => {
+      if (healthRefreshingRef.current) return;
+      healthRefreshingRef.current = true;
+      try {
+        await obterSaudeApi();
+        if (active) setServer("online");
+      } catch {
+        if (active) setServer("offline");
+      } finally {
+        healthRefreshingRef.current = false;
+      }
+    };
+
+    void refreshHealth();
+    void refreshCamera();
+    const cameraInterval = window.setInterval(() => void refreshCamera(), 250);
+    const healthInterval = window.setInterval(() => void refreshHealth(), 15000);
     return () => {
       active = false;
-      window.clearInterval(interval);
+      window.clearInterval(cameraInterval);
+      window.clearInterval(healthInterval);
     };
   }, []);
 
@@ -65,6 +79,10 @@ export function SystemConnectionStatus() {
   const label = (state: Connection) =>
     state === "online" ? "Conectado" : state === "offline" ? "Desconectado" : "Verificando";
   const streamActive = camera === "online" && streamReady;
+  const gestureAgeMs = gestureFrameAt
+    ? Math.max(0, Date.now() - Date.parse(gestureFrameAt))
+    : null;
+  const gestureReadingFresh = gestureAgeMs !== null && gestureAgeMs <= 500;
 
   return (
     <div
@@ -85,6 +103,20 @@ export function SystemConnectionStatus() {
         {lastImage
           ? `Lido pelo servidor: ${new Date(lastImage).toLocaleString("pt-BR")}`
           : "Nenhum quadro recebido recentemente"}
+      </span>
+      <span
+        className={cn(
+          "font-medium",
+          gestureReadingFresh ? "text-success" : "text-warning",
+        )}
+        title="Resultado do último quadro analisado; não significa que o alerta já foi confirmado."
+        aria-live="polite"
+      >
+        {gestureAgeMs === null
+          ? "Leitura: aguardando análise"
+          : gestureReadingFresh
+            ? `Leitura: ${liveGesture ?? "nenhum gesto"}`
+            : `Leitura atrasada: ${liveGesture ?? "nenhum gesto"} (${(gestureAgeMs / 1000).toFixed(1)} s)`}
       </span>
       <div className="w-full max-w-xl overflow-hidden rounded-md border border-border bg-sidebar">
         <div className="flex items-center justify-between border-b border-border px-3 py-2 font-medium">
@@ -121,9 +153,9 @@ export function SystemConnectionStatus() {
           )}
         </div>
         <p className="border-t border-border px-3 py-2 text-muted-foreground">
-          A imagem atualiza conforme a ESP32 envia quadros (teto teórico de até 4 por segundo; a taxa
-          real depende da captura e da rede). A leitura de gestos roda separada e pode aparecer depois;
-          isso não é vídeo fluido de 30 fps.
+          Imagem: até 10 quadros/s teóricos. A leitura acima mostra o último quadro analisado e fica
+          amarela após 0,5 s sem novo quadro analisado; alertas aguardam estabilidade e 1,5 s. A taxa real
+          depende da captura, Wi-Fi, TLS, rede e CPU do Render Free; não há garantia de latência rígida.
         </p>
       </div>
     </div>
