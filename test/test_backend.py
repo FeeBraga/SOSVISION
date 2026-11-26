@@ -95,6 +95,9 @@ class CameraApiTests(unittest.TestCase):
         api.last_frame_jpeg = None
         api.last_stream_jpeg = None
         api.last_frame_sequence = 0
+        with api.gesture_status_lock:
+            api.last_live_gesture = None
+            api.last_gesture_frame_at = None
         with api.camera_frame_queue_lock:
             api.pending_camera_frame = None
             api.camera_frame_worker_active = False
@@ -133,6 +136,28 @@ class CameraApiTests(unittest.TestCase):
             process_mock.assert_called_once()
             self.assertNotEqual(api.last_stream_jpeg, self.jpeg)
             self.assertEqual(api.last_frame_sequence, 2)
+
+    def test_live_gesture_candidate_is_available_before_alert_confirmation(self):
+        landmarks = [SimpleNamespace()]
+        with (
+            patch.object(
+                api.hands,
+                "process",
+                return_value=SimpleNamespace(multi_hand_landmarks=landmarks),
+            ) as process_mock,
+            patch.object(api.mp.solutions.drawing_utils, "draw_landmarks"),
+            patch.object(api, "reconhecer_gesto", return_value="PERDIDO"),
+        ):
+            result, notification = api._process_frame(self.jpeg)
+
+        self.assertEqual(process_mock.call_args.args[0].shape[:2], (40, 60))
+        self.assertEqual(result["live_gesture"], "PERDIDO")
+        self.assertIsNone(result["gesture"])
+        self.assertIsNone(result["alert"])
+        self.assertIsNone(notification)
+        status = api.camera_status()
+        self.assertEqual(status["live_gesture"], "PERDIDO")
+        self.assertIsNotNone(status["last_gesture_frame_at"])
 
     def test_busy_worker_keeps_only_the_latest_pending_frame(self):
         api.camera_frame_worker_active = True
