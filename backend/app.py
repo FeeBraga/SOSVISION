@@ -53,6 +53,7 @@ app.add_middleware(
 
 hands = mp.solutions.hands.Hands(
     static_image_mode=False,
+    model_complexity=0,
     max_num_hands=1,
     min_detection_confidence=0.55,
     min_tracking_confidence=0.5,
@@ -66,6 +67,9 @@ last_alert_at = 0.0
 last_frame_received_at = None
 last_frame_jpeg = None
 last_stream_jpeg = None
+last_live_gesture: str | None = None
+last_gesture_frame_at: datetime | None = None
+gesture_status_lock = threading.Lock()
 last_frame_sequence = 0
 last_frame_lock = threading.Lock()
 camera_frame_queue_lock = threading.Lock()
@@ -237,6 +241,9 @@ def health():
 def camera_status():
     with last_frame_lock:
         last_received = last_frame_received_at
+    with gesture_status_lock:
+        live_gesture = last_live_gesture
+        gesture_frame_at = last_gesture_frame_at
     connected = bool(
         last_received
         and (datetime.now(timezone.utc) - last_received).total_seconds()
@@ -245,6 +252,10 @@ def camera_status():
     return {
         "connected": connected,
         "last_image_received_at": last_received.isoformat() if last_received else None,
+        "live_gesture": live_gesture,
+        "last_gesture_frame_at": (
+            gesture_frame_at.isoformat() if gesture_frame_at else None
+        ),
     }
 
 
@@ -283,7 +294,7 @@ async def stream_camera_frames():
                 + frame
                 + b"\r\n"
             )
-        await asyncio.sleep(0.1)
+        await asyncio.sleep(0.02)
 
 
 @app.get("/api/camera/stream")
@@ -376,33 +387,37 @@ def _process_frame(
     global last_frame_jpeg
     global last_stream_jpeg
     global last_frame_sequence
+    global last_live_gesture
+    global last_gesture_frame_at
 
     frame = cv2.imdecode(np.frombuffer(jpeg, dtype=np.uint8), cv2.IMREAD_COLOR)
     if frame is None:
         raise ValueError("Invalid JPEG image")
     rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    inference_rgb = cv2.resize(
+        rgb,
+        (max(1, rgb.shape[1] // 2), max(1, rgb.shape[0] // 2)),
+        interpolation=cv2.INTER_AREA,
+    )
     received_at = received_at or datetime.now(timezone.utc)
 
     notification = None
 
     with vision_lock:
-        result = hands.process(rgb)
+        result = hands.process(inference_rgb)
         landmarks = (
             result.multi_hand_landmarks[0]
             if result.multi_hand_landmarks
             else None
         )
-        if landmarks:
-            mp.solutions.drawing_utils.draw_landmarks(
-                frame,
-                landmarks,
-                mp.solutions.hands.HAND_CONNECTIONS,
-            )
         candidate = (
             reconhecer_gesto(landmarks)
             if landmarks
             else None
         )
+        with gesture_status_lock:
+            last_live_gesture = candidate
+            last_gesture_frame_at = received_at
         recent_gestures.append(candidate)
         votes = Counter(gesture for gesture in recent_gestures if gesture is not None)
         detected = next(
@@ -417,50 +432,67 @@ def _process_frame(
         else:
             gesture = None
 
-        if detected is None:
-            reading_label = "Aguardando gesto..."
+        if candidate is not None and candidate != detected:
+            reading_label = f"LEITURA: {candidate} | VALIDANDO"
+        elif detected is None:
+            reading_label = "AGUARDANDO GESTO..."
         elif gesture_confirmation.alert_sent:
-            reading_label = f"ALERTA ENVIADO: {detected}"
+            reading_label = f"LEITURA: {candidate or detected} | ALERTA ENVIADO"
         else:
             elapsed = max(0.0, now - (gesture_confirmation.started_at or now))
-            reading_label = (
-                f"CONFIRMANDO: {detected} "
-                f"{min(elapsed, TEMPO_CONFIRMACAO):.1f}/{TEMPO_CONFIRMACAO:.1f}s"
-            )
-
-    height, width = frame.shape[:2]
-    cv2.rectangle(frame, (0, 0), (width, 58), (20, 25, 30), thickness=-1)
-    cv2.putText(
-        frame,
-        reading_label,
-        (12, 25),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.58,
-        (80, 230, 120) if detected is not None else (220, 220, 220),
-        2,
-        cv2.LINE_AA,
-    )
-    local_received_at = received_at.astimezone(timezone(timedelta(hours=-3)))
-    cv2.putText(
-        frame,
-        f"LIDO: {local_received_at.strftime('%d/%m/%Y %H:%M:%S')}",
-        (12, 48),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.45,
-        (220, 220, 220),
-        1,
-        cv2.LINE_AA,
-    )
-    encoded, stream_buffer = cv2.imencode(".jpg", frame)
-    if not encoded:
-        raise RuntimeError("Não foi possível codificar o quadro anotado")
+            reading_label = f"LEITURA: {candidate or detected} | CONFIRMANDO {min(elapsed, TEMPO_CONFIRMACAO):.1f}s"
 
     with last_frame_lock:
-        if frame_sequence is None or frame_sequence == last_frame_sequence:
-            last_frame_jpeg = jpeg
-            last_stream_jpeg = stream_buffer.tobytes()
-            last_frame_received_at = received_at
-            last_frame_sequence += 1
+        should_publish_overlay = (
+            frame_sequence is None or frame_sequence == last_frame_sequence
+        )
+
+    if should_publish_overlay:
+        if landmarks:
+            mp.solutions.drawing_utils.draw_landmarks(
+                frame,
+                landmarks,
+                mp.solutions.hands.HAND_CONNECTIONS,
+            )
+        height, width = frame.shape[:2]
+        cv2.rectangle(frame, (0, 0), (width, 58), (20, 25, 30), thickness=-1)
+        cv2.putText(
+            frame,
+            reading_label,
+            (12, 25),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.58,
+            (0, 190, 255)
+            if candidate is not None and candidate != detected
+            else (80, 230, 120)
+            if detected is not None
+            else (0, 190, 255)
+            if candidate is not None
+            else (220, 220, 220),
+            2,
+            cv2.LINE_AA,
+        )
+        local_received_at = received_at.astimezone(timezone(timedelta(hours=-3)))
+        cv2.putText(
+            frame,
+            f"LIDO: {local_received_at.strftime('%d/%m/%Y %H:%M:%S')}",
+            (12, 48),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.45,
+            (220, 220, 220),
+            1,
+            cv2.LINE_AA,
+        )
+        encoded, stream_buffer = cv2.imencode(".jpg", frame)
+        if not encoded:
+            raise RuntimeError("Não foi possível codificar o quadro anotado")
+
+        with last_frame_lock:
+            if frame_sequence is None or frame_sequence == last_frame_sequence:
+                last_frame_jpeg = jpeg
+                last_stream_jpeg = stream_buffer.tobytes()
+                last_frame_received_at = received_at
+                last_frame_sequence += 1
 
     if gesture is not None:
         try:
@@ -468,8 +500,18 @@ def _process_frame(
         except HTTPException:
             gesture_confirmation.retry_after_failure()
             raise
-        return {"received": True, "gesture": detected, "alert": saved_alert}, notification
-    return {"received": True, "gesture": detected, "alert": None}, None
+        return {
+            "received": True,
+            "gesture": detected,
+            "live_gesture": candidate,
+            "alert": saved_alert,
+        }, notification
+    return {
+        "received": True,
+        "gesture": detected,
+        "live_gesture": candidate,
+        "alert": None,
+    }, None
 
 
 def _drain_camera_frame_queue():
